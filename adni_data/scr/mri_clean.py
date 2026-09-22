@@ -1,125 +1,95 @@
-# Import libraries
+# This textfile is used for preprocessing UCSF FreeSurfer MRI derived from ADNI
+# Import working libraries
 import os
 import warnings
-import pansas as pd
+import pandas as pd
 import numpy as np
 
+# Data source:
+# Alzheimer's Disease Neuroimaging Initiative (ADNI)
 # Load dataset
-df = pd.read_csv("ucsf_fsx7.csv")
-print(df.head(10))
-print()
-print(df.tail(10))
+df = pd.read_csv('../data/ucsf_fsx7.csv') # The dataset will be provided
 
-# Check data's shape
-print(f"Shape: {df.shape[0]} rows x {df.shape[1]} columns") # (12290, 347)
+# Print original shape
+print(f"Original shape: {df.shape[0]} rows x {df.shape[1]} columns") # (12290, 347)
 
-# Count data's type
-print(df.dtypes.value_counts())
+# Filtering based on study reference
+# Select Field Strength = 3T only
+df = (df[df["FIELD_STRENGTH"] == "3T"].copy().reset_index(drop=True))
 
-# Count how many MRI features in the dataset
-id_cols = ["PTID",
-           "VSCODE2"]
-acquisition_cols = ["FIELD_STRENGTH"]
+# Conver EXAMDATE to a real date
+df["EXAMDATE"] = pd.to_datetime(df["EXAMDATE"], errors="coerce")
 
-exclude_cols = id_cols + acquisition_cols
+# Use EXAMDATE to select the earliest visit for MRI for each subjects
+df = (df.sort_values(["PTID", "EXAMDATE"])  # Sort subject id based on the ealiest exam date
+      .drop_duplicates(subset="PTID", keep="first") # Drop duplicate rows for subject, but keep 1 unique row
+      .reset_index(drop=True))
 
-mri_features = [
-    col for col in df.columns
-    if col not in exclude_cols
-    and pd.api.types.is_numeric_dtype(df[col])
-]
+# Drop unnecessary columns
+keep_cols = ["PTID", "VISCODE2", "FIELD_STRENGTH", "EXAMDATE"] + [col for col in df.columns if col.startswith("ST")]
+df = df[keep_cols]
 
-print("MRI features:", len(mri_features))  # MRI features: 326
+print(f"Total of duplicated rows: {df["PTID"].duplicated().sum()} rows") # 0 rows
+print(f"Shape after preprocessing: {df.shape[0]} rows x {df.shape[1]} columns") # (2565, 330)
 
-# Checking missing values of MRI features
-missing = (df[mri_features].isna().mean().sort_values(ascending=False))
+# Preprocessing +300 FreeSurfer MRI features set
+mri_features = [col for col in df.columns if col.startswith("ST") # Select only column contains 'ST'
+                
+                      and pd.api.types.is_numeric_dtype(df[col])]       # Those 'ST' columns must contain numeric varibles
 
-missing_df = pd.DataFrame({"missing_pct": missing * 100})
+# Report number of mri features of the curent table
+print("Original MRI features:", len(mri_features))   # 325
 
-missing_df.head(30) # ST8SV has 99.06% and ST68SV	has 90.88% missing values
+# Divide features into 5 sets according to type of 
+cv_features = [c for c in df.columns if c.endswith('CV')] # Cortical Volume
+sa_features = [c for c in df.columns if c.endswith('SA')] # Surface Area
+ta_features = [c for c in df.columns if c.endswith('TA')] # Mean Cortical Thickness
+ts_features = [c for c in df.columns if c.endswith('TS')] # Cortical Thickness Standard Deviation
+sv_features = [c for c in df.columns if c.endswith('SV')] # Subcortical / Aseg Volume
 
-# Drop missing values due to threshold 
-missing_threshold = 0.30
+print("Cortical Volume:", len(cv_features))                                # 69
+print("Surface Area:", len(sa_features))                                   # 69
+print("Mean Cortical Thickness:", len(ta_features))                        # 68
+print("Cortical Thickness Standard Deviation:", len(ts_features))          # 68
+print("Subcortical/Aseg Volume:", len(sv_features))                        # 50
 
-features_keep = missing[
-    missing <= missing_threshold
-].index.tolist()
+# Checking missing values within groups
+def check_missing(df, *features):
 
-print("Before:", len(mri_features))
-print("After missingness filter:", len(features_keep)) 
+    names = ["CV", "SA", "TA", "TS", "SV"]
 
-# Check unique features
-nunique = df[features_keep].nunique(dropna=True)
+    for name, feature_group in zip(names, features):
 
-constant_features = nunique[
-    nunique <= 1
-].index.tolist()
+        missing = df[feature_group].isna().sum()
+        missing_pct = round((missing/len(df)*100),3)      # Giving missing percentage of each columns
 
-constant_features # []
+        print(f"\n{name}")
+        print(missing_pct[missing_pct > 0].sort_values(ascending=False))
 
-# Correlation and flag the high corr
-corr = df[features_keep].corr().abs()
-
-upper = corr.where(
-    np.triu(
-        np.ones(corr.shape),
-        k=1
-    ).astype(bool)
+check_missing(
+    df,
+    cv_features,
+    sa_features,
+    ta_features,
+    ts_features,
+    sv_features
 )
+# Drop 2 features: ST8SV and ST68SV have 98.8% and 93.7% missing values
+df = df.drop(columns=['ST8SV','ST68SV'])
 
-high_corr_features = [
-    column
-    for column in upper.columns
-    if any(upper[column] > 0.90)
-]
+# Update mri_features
+mri_features = [col for col in mri_features if col not in ["ST8SV", "ST68SV"]]
 
-print("Highly correlated features:", len(high_corr_features)) # Highly correlated features: 10
+print("Total of the features after dropping mising:", len(mri_features), "features") 
+# Update
+cv_features = [c for c in df.columns if c.endswith('CV')] # Cortical volume
+sa_features = [c for c in df.columns if c.endswith('SA')] # Surface area
+ta_features = [c for c in df.columns if c.endswith('TA')] # Mean cortical thickness
+ts_features = [c for c in df.columns if c.endswith('TS')] # Cortical thickness standard deviation
+sv_features = [c for c in df.columns if c.endswith('SV')] # Subcortical / aseg volume
 
-# Create table of high correlation pairs
-corr_pairs = []
-
-for i in range(len(upper.columns)):
-    for j in range(i):
-        
-        value = upper.iloc[j, i]
-        
-        if pd.notna(value) and value > 0.90:
-            corr_pairs.append([
-                upper.columns[j],
-                upper.columns[i],
-                value
-            ])
-
-corr_pairs_df = pd.DataFrame(
-    corr_pairs,
-    columns=[
-        "Feature_1",
-        "Feature_2",
-        "Correlation"
-    ]
-)
-
-corr_pairs_df = corr_pairs_df.sort_values(
-    "Correlation",
-    ascending=False
-)
-
-corr_pairs_df.head(30)
-
-# Drop features with extreme missingness
-df1 = df.drop(columns=["ST8SV", "ST68SV", "STATUS"]).copy()
-
-# Keep identifiers/acquisition info + all ST features
-keep_cols = [
-    "PTID",
-    "VISCODE2",
-    "FIELD_STRENGTH"
-] + [
-    col for col in df1.columns
-    if col.startswith("ST")
-]
-
-df1 = df1[keep_cols]
-
-print(df1.shape)
-df1.head()
+print("CV:", len(cv_features))
+print("SA:", len(sa_features))
+print("TA:", len(ta_features))
+print("TS:", len(ts_features))
+print("SV:", len(sv_features))
